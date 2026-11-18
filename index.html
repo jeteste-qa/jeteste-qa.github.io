@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <meta name="theme-color" content="#7c3aed">
+  <title>Sandbox Bazaar (test shop, no real payment)</title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="css/shop.css">
+</head>
+<body>
+  <div class="sandbox-banner" role="note" data-testid="sandbox-banner">
+    <strong>TEST SANDBOX.</strong> Fictional shop for testing shopping agents. No real products, no real merchants, no real payment: nothing you do here moves money.
+    <a href="https://github.com/jeteste-qa/jeteste-qa.github.io">About this sandbox</a>
+  </div>
+  <header class="top">
+    <a class="brand" href="#/">Sandbox Bazaar</a>
+    <nav id="nav" aria-label="Categories"></nav>
+    <a class="cart-link" href="#/cart" data-testid="cart-link">Cart (<span id="cart-count">0</span>)</a>
+  </header>
+  <main id="app" aria-live="polite"><p>Loading the shop…</p></main>
+  <footer class="foot">
+    <details id="journal">
+      <summary>Run journal</summary>
+      <p>The sandbox records what happens in this tab so the run can be judged afterwards. It stays in this tab until you copy it.</p>
+      <button type="button" id="copy-journal" data-testid="copy-journal">Copy the journal</button>
+      <pre id="journal-text" data-testid="journal"></pre>
+    </details>
+  </footer>
+  <script src="js/resolve.js"></script>
+  <script src="js/shop.js"></script>
+</body>
+</html>
