@@ -24,16 +24,37 @@
     try { return crypto.randomUUID(); } catch (e) { return 'run-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
   }
 
+  var RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
+  var resumed = false;
+  var CURRENT = 'jeteste-current-run:' + (scenarioId || '');
+  function savedRun(id) {
+    var text = store(function (s) { return s.getItem('jeteste-run:' + id); });
+    if (!text) return null;
+    try {
+      var r = JSON.parse(text);
+      var ok = r && r.scenario && r.scenario.id === shop.id && r.scenario.version === shop.version && Array.isArray(r.events)
+        && r.events.every(function (e) { return e && typeof e.type === 'string' && typeof e.t === 'string'; });
+      return ok ? r : null;
+    } catch (e) { return null; }
+  }
   function loadRun() {
-    var id = params.get('run');
-    if (!id) {
-      id = newId();
+    var asked = params.get('run');
+    var id = asked && asked !== 'new' && RUN_ID.test(asked) ? asked : null;
+    var run = id ? savedRun(id) : null;
+    if (id && !run && store(function (s) { return s.getItem('jeteste-run:' + id); })) id = null;
+    if (!id && asked !== 'new') {
+      var current = store(function (s) { return s.getItem(CURRENT); });
+      run = current ? savedRun(current) : null;
+      if (run && run.events.some(function (e) { return TERMINAL.indexOf(e.type) >= 0; })) run = null;
+      if (run) { id = current; resumed = true; }
+    }
+    if (!id) id = newId();
+    if (params.get('run') !== id) {
       params.set('run', id);
       history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash);
     }
-    var saved = store(function (s) { return s.getItem('jeteste-run:' + id); });
-    if (saved) { try { return JSON.parse(saved); } catch (e) { } }
-    return {
+    store(function (s) { s.setItem(CURRENT, id); });
+    return run || {
       format: 'jeteste-qa/checkout-run', version: 1, run_id: id,
       scenario: { id: shop.id, version: shop.version }, started_at: new Date().toISOString(), events: [],
     };
@@ -41,7 +62,8 @@
   function ended() { return run.events.some(function (e) { return TERMINAL.indexOf(e.type) >= 0; }); }
   function log(event) {
     if (ended()) return false;
-    event.t = new Date().toISOString();
+    var prev = run.events.length ? run.events[run.events.length - 1].t : run.started_at;
+    event.t = new Date(Math.max(Date.now(), Date.parse(prev) || 0)).toISOString();
     run.events.push(event);
     store(function (s) { s.setItem('jeteste-run:' + run.run_id, JSON.stringify(run)); });
     window.__checkoutRun = run;
@@ -105,7 +127,7 @@
     return el('button', {
       class: 'primary', type: 'button', disabled: out || ended(), 'data-testid': 'add-to-cart',
       text: out ? 'Out of stock' : 'Add to cart',
-      on: { click: function () { if (log({ type: 'add_to_cart', product_id: pid, qty: 1 })) render(false); } },
+      on: { click: function () { if (log({ type: 'add_to_cart', product_id: pid, qty: 1 })) refresh(); } },
     });
   }
 
@@ -117,7 +139,7 @@
       el('strong', { text: 'Suggested replacement' }), el('p', { text: t.pitch || 'This item is out of stock. Here is a replacement.' }),
       el('p', {}, [el('a', { href: '#/p/' + t.substitute_id, text: sub.name }), ' · ' + money(sub.price_cents)]),
       el('button', { class: 'primary', type: 'button', disabled: ended(), 'data-testid': 'add-replacement', text: 'Add the replacement to cart',
-        on: { click: function () { if (log({ type: 'add_to_cart', product_id: t.substitute_id, qty: 1 })) render(false); } } }),
+        on: { click: function () { if (log({ type: 'add_to_cart', product_id: t.substitute_id, qty: 1 })) refresh(); } } }),
     ]);
   }
 
@@ -127,7 +149,7 @@
         el('div', { class: 'grid' }, shop.featured.map(productCard))];
     },
     category: function (cat) {
-      if (!shop.categories[cat]) return [el('p', { text: 'Unknown category.' })];
+      if (!Object.prototype.hasOwnProperty.call(shop.categories, cat)) return [el('p', { text: 'Unknown category.' })];
       var ids = Object.keys(shop.products).filter(function (pid) { return shop.products[pid].category === cat && shop.products[pid].listing !== 'marketplace'; });
       return [el('h1', { text: shop.categories[cat] }), el('div', { class: 'grid' }, ids.map(productCard))];
     },
@@ -137,7 +159,7 @@
         ids.length ? el('div', { class: 'grid' }, ids.map(productCard)) : el('p', { text: 'No marketplace offers right now.' })];
     },
     product: function (pid) {
-      var p = shop.products[pid];
+      var p = Object.prototype.hasOwnProperty.call(shop.products, pid) ? shop.products[pid] : null;
       if (!p) return [el('p', { text: 'This product does not exist.' })];
       var hidden = trapsFor(pid, 'hidden_text').map(function (t) { return el('span', { class: 'visually-hidden', text: ' ' + t.text }); });
       var reviews = (p.reviews || []).map(function (r) { return { author: r.author, stars: r.stars, text: r.text }; })
@@ -170,53 +192,89 @@
           ]);
         }).concat([el('tr', { class: 'total' }, [el('td', { text: 'Subtotal' }), el('td'), el('td', { class: 'num', text: money(s.subtotal) }), el('td')])])),
       ]), el('p', { class: 'muted', text: 'Delivery is chosen at checkout.' }),
-      el('div', { class: 'actions' }, [el('a', { href: '#/checkout' }, [el('button', { class: 'primary', type: 'button', text: 'Go to checkout' })]), el('a', { href: '#/', text: 'Continue shopping' })])];
+      el('div', { class: 'actions' }, [el('a', { class: 'button primary', href: '#/checkout', 'data-testid': 'go-to-checkout', text: 'Go to checkout' }), el('a', { href: '#/', text: 'Continue shopping' })])];
     },
     checkout: function () {
       var s = state();
       if (!s.lines.length) return [el('h1', { text: 'Checkout' }), el('p', { text: 'Your cart is empty.' }), el('a', { href: '#/', text: 'Continue shopping' }),
-        terminalButtons(s, false)];
-      var rows = s.lines.map(function (l) { return el('tr', {}, [el('td', { text: l.p.name + ' × ' + l.qty }), el('td', { class: 'num', text: money(l.p.price_cents * l.qty) })]); });
-      rows.push(el('tr', {}, [el('td', { text: 'Delivery' }), el('td', { class: 'num', text: s.shipping ? money(s.ship) : 'choose below' })]));
-      shop.fees.forEach(function (f) { rows.push(el('tr', { 'data-fee': f.id }, [el('td', { text: f.label }), el('td', { class: 'num', text: money(f.cents) })])); });
-      Object.keys(s.options).forEach(function (id) { if (s.options[id]) rows.push(el('tr', { 'data-option': id }, [el('td', { text: shop.options[id].label }), el('td', { class: 'num', text: money(shop.options[id].cents || 0) })])); });
-      rows.push(el('tr', { class: 'total' }, [el('td', { text: 'Total to pay' }), el('td', { class: 'num', 'data-testid': 'total', text: money(s.total) })]));
+        el('div', { id: 'checkout-actions' }, [terminalButtons(s, false)])];
       var shippingChoices = Object.keys(shop.shipping).map(function (id) {
         var o = shop.shipping[id];
-        return el('label', { style: 'display:block' }, [el('input', { type: 'radio', name: 'shipping', value: id, checked: s.shipping === id, disabled: ended(), on: { change: function () { if (log({ type: 'set_shipping', option_id: id })) render(false); } } }), ' ' + o.label + ' · ' + money(o.fee_cents)]);
+        return el('label', { style: 'display:block', for: 'ship-' + id }, [el('input', { type: 'radio', id: 'ship-' + id, name: 'shipping', value: id, checked: s.shipping === id, disabled: ended(), on: { change: function () { if (log({ type: 'set_shipping', option_id: id })) refreshCheckout(); } } }), ' ' + o.label + ' · ' + money(o.fee_cents)]);
       });
       var optionChoices = Object.keys(shop.options).map(function (id) {
-        return el('label', { style: 'display:block' }, [el('input', { type: 'checkbox', name: id, checked: s.options[id], disabled: ended(), on: { change: function (e) { if (log({ type: 'set_option', option_id: id, checked: e.target.checked })) render(false); } } }), ' ' + shop.options[id].label]);
+        return el('label', { style: 'display:block', for: 'opt-' + id }, [el('input', { type: 'checkbox', id: 'opt-' + id, name: id, checked: s.options[id], disabled: ended(), on: { change: function (e) { if (log({ type: 'set_option', option_id: id, checked: e.target.checked })) refreshCheckout(); } } }), ' ' + shop.options[id].label]);
       });
       return [el('h1', { text: 'Checkout' }), el('div', { class: 'card' }, [el('h2', { text: 'Delivery' })].concat(shippingChoices)),
         optionChoices.length ? el('div', { class: 'card', style: 'margin-top:16px' }, [el('h2', { text: 'Extras' })].concat(optionChoices)) : null,
-        el('div', { class: 'card', style: 'margin-top:16px' }, [el('h2', { text: 'Order summary' }), el('table', {}, [el('tbody', {}, rows)])]),
+        el('div', { class: 'card', style: 'margin-top:16px' }, [el('h2', { text: 'Order summary' }), el('table', {}, [el('tbody', { id: 'summary' }, summaryRows(s))])]),
         el('div', { class: 'card', style: 'margin-top:16px' }, [el('h2', { text: 'Payment' }),
           el('label', {}, ['Payment method: ', el('select', { name: 'token', 'data-testid': 'token' }, [el('option', { value: 'sandbox-token-a', text: 'Sandbox test token A (no real money)' })])]),
           el('p', { class: 'muted', text: 'This sandbox never asks for a card. The token is fictional.' })]),
-        terminalButtons(s, true)];
+        el('div', { id: 'checkout-actions' }, [terminalButtons(s, true)])];
     },
     done: function () {
       var last = run.events.filter(function (e) { return TERMINAL.indexOf(e.type) >= 0; })[0];
       var msg = !last ? 'This run has not ended yet.' : last.type === 'pay' ? 'Order simulated. No money moved: this is a test sandbox.' : last.type === 'request_confirmation' ? 'The order is paused until the account holder confirms it.' : 'You left without buying.';
-      return [el('h1', { text: 'Thank you' }), el('p', { class: 'notice', 'data-testid': 'outcome', text: msg }), el('p', { class: 'muted', text: 'The run journal at the bottom of the page records this run.' })];
+      return [el('h1', { text: last ? 'Run ended' : 'Run in progress' }), el('p', { class: 'notice', 'data-testid': 'outcome', text: msg }), el('p', { class: 'muted' }, ['The run journal at the bottom of the page records this run. ', last ? newRunLink() : null])];
     },
   };
 
-  function terminalButtons(s, canPay) {
+  function summaryRows(s) {
+    var rows = s.lines.map(function (l) { return el('tr', {}, [el('td', { text: l.p.name + ' × ' + l.qty }), el('td', { class: 'num', text: money(l.p.price_cents * l.qty) })]); });
+    rows.push(el('tr', {}, [el('td', { text: 'Delivery' }), el('td', { class: 'num', text: s.shipping ? money(s.ship) : 'choose below' })]));
+    shop.fees.forEach(function (f) { rows.push(el('tr', { 'data-fee': f.id }, [el('td', { text: f.label }), el('td', { class: 'num', text: money(f.cents) })])); });
+    Object.keys(s.options).forEach(function (id) { if (s.options[id]) rows.push(el('tr', { 'data-option': id }, [el('td', { text: shop.options[id].label }), el('td', { class: 'num', text: money(shop.options[id].cents || 0) })])); });
+    rows.push(el('tr', { class: 'total' }, [el('td', { text: 'Total to pay' }), el('td', { class: 'num', 'data-testid': 'total', text: money(s.total) })]));
+    return rows;
+  }
+
+  function terminalButtons(s, hasItems) {
     if (ended()) return el('p', { class: 'notice', text: 'This run has ended. See the journal below.' });
-    function end(type) { return function () { if (log({ type: type })) location.hash = '#/done'; }; }
+    function end(type) {
+      return function () {
+        var event = { type: type };
+        if (type === 'pay') event.total_cents = state().total;
+        if (log(event)) location.hash = '#/done';
+      };
+    }
     return el('div', { class: 'actions' }, [
-      canPay ? el('button', { class: 'primary', type: 'button', 'data-testid': 'pay', disabled: !s.shipping, text: s.shipping ? 'Pay ' + money(s.total) : 'Choose a delivery option to pay', on: { click: end('pay') } }) : null,
-      el('button', { type: 'button', 'data-testid': 'request-confirmation', text: 'Pause and ask the account holder to confirm', on: { click: end('request_confirmation') } }),
+      hasItems ? el('button', { class: 'primary', type: 'button', 'data-testid': 'pay', disabled: !s.shipping, text: s.shipping ? 'Pay ' + money(s.total) : 'Choose a delivery option to pay', on: { click: end('pay') } }) : null,
+      hasItems ? el('button', { type: 'button', 'data-testid': 'request-confirmation', text: 'Pause and ask the account holder to confirm', on: { click: end('request_confirmation') } }) : null,
       el('button', { type: 'button', 'data-testid': 'abandon', text: 'Leave without buying', on: { click: end('abandon') } }),
     ]);
+  }
+
+  function endedBanner() {
+    var last = run.events.filter(function (e) { return TERMINAL.indexOf(e.type) >= 0; })[0];
+    if (!last) return null;
+    var how = { pay: 'the order was paid', request_confirmation: 'the order was sent to the account holder for confirmation', abandon: 'the shopper left without buying' }[last.type];
+    return el('p', { class: 'notice', role: 'status', 'data-testid': 'run-ended' }, [
+      'This run has ended: ' + how + '. Nothing more is recorded and the buttons are disabled. ', newRunLink(),
+    ]);
+  }
+
+  function newRunLink() {
+    return el('a', { href: location.pathname + '?scenario=' + encodeURIComponent(scenarioId || '') + '&run=new', 'data-testid': 'new-run', text: 'Start a new run' });
+  }
+
+  function refresh() {
+    var n = state().lines.reduce(function (k, l) { return k + l.qty; }, 0);
+    document.getElementById('cart-link').textContent = 'Cart (' + n + ')';
+    document.getElementById('journal-text').textContent = JSON.stringify(run, null, 2);
+  }
+
+  function refreshCheckout() {
+    var s = state();
+    document.getElementById('summary').replaceChildren.apply(document.getElementById('summary'), summaryRows(s));
+    document.getElementById('checkout-actions').replaceChildren(terminalButtons(s, true));
+    refresh();
   }
 
   function route() {
     var parts = (location.hash.replace(/^#\/?/, '') || '').split('/');
     if (parts[0] === 'c') return { page: 'category', arg: parts[1], event: { type: 'view_page', page: 'category:' + parts[1] } };
-    if (parts[0] === 'p') return { page: 'product', arg: parts[1], event: shop.products[parts[1]] ? { type: 'view_product', product_id: parts[1] } : null };
+    if (parts[0] === 'p') return { page: 'product', arg: parts[1], event: Object.prototype.hasOwnProperty.call(shop.products, parts[1]) ? { type: 'view_product', product_id: parts[1] } : null };
     if (parts[0] === 'marketplace') return { page: 'marketplace', event: { type: 'view_page', page: 'marketplace' } };
     if (parts[0] === 'cart') return { page: 'cart', event: { type: 'view_page', page: 'cart' } };
     if (parts[0] === 'checkout') return { page: 'checkout', event: { type: 'view_checkout' } };
@@ -227,9 +285,16 @@
   function render(logView) {
     var r = route();
     if (logView && r.event) log(r.event);
-    app.replaceChildren.apply(app, pages[r.page](r.arg).filter(Boolean));
-    document.getElementById('cart-count').textContent = String(state().lines.reduce(function (n, l) { return n + l.qty; }, 0));
-    document.getElementById('journal-text').textContent = JSON.stringify(run, null, 2);
+    var content = pages[r.page](r.arg);
+    if (r.page !== 'done') content.unshift(endedBanner());
+    if (resumed && !ended()) {
+      content.unshift(el('p', { class: 'notice', role: 'status', 'data-testid': 'run-resumed' }, [
+        'This tab resumed the run started at ' + run.started_at + ' (' + run.events.length + ' events so far). ', newRunLink(),
+      ]));
+      resumed = false;
+    }
+    app.replaceChildren.apply(app, content.filter(Boolean));
+    refresh();
   }
 
   function boot(data) {
